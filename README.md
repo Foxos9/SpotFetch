@@ -7,9 +7,7 @@ A simple python program to download Music from various platfroms using yt-dlp ( 
 
 ## What it can do :
 
-- Download Spotify playlists directly (without Exportify) using the Spotify Web API
-- Download your Liked Songs from Spotify
-- Download Spotify playlists after exporting the playlist as a csv file from [Exportify](https://exportify.app) (still supported)
+- Download Spotify playlists
 - batch download music from a .txt file with URLs one by line, or using a custom CSV file with headers *name,artist*
 - Direct download from a Youtube url, can be a video or playlist.
 - Search then download a song using its name and artist name.
@@ -21,13 +19,25 @@ A simple python program to download Music from various platfroms using yt-dlp ( 
 
 # Installation :
 
-### Requirements :
+### Option 1: Standalone executable (recommended)
+
+Download the latest `SpotFetch.exe` (Windows), `SpotFetch_macos` (macOS), or `SpotFetch_linux` (Linux) from the [Releases page](https://github.com/MrElyazid/SpotFetch/releases/latest).
+
+#### Requirements :
 
 - First make sure you have ffmpeg installed on your machine [Download here](https://ffmpeg.org/download.html).
-- Make sure you have [Python](https://www.python.org/downloads/) installed too, and is in your system path.
+
+That's it — just run the downloaded file.
+
+### Option 2: Run from source with Python
+
+#### Requirements :
+
+- Make sure you have [Python](https://www.python.org/downloads/) installed and in your system path.
+- Make sure you have ffmpeg installed on your machine [Download here](https://ffmpeg.org/download.html).
 - If you dont have Git to clone the repo thats fine, you can download it as a zip file and uncompress it, see [here](.github/if_no_git.png).
 
-### setup :
+#### setup :
 
 - Clone this repository ( or just download it as a zip file and uncompress it ):
 
@@ -62,7 +72,7 @@ before running `pip install -r requirements.txt` make sure you [create](https://
 
 ### Spotify API Setup (for direct Spotify downloads) :
 
-SpotFetch can download playlists and liked songs directly from Spotify without needing Exportify.
+SpotFetch can download playlists and liked songs directly from Spotify.
 A built-in Client ID is provided, so no account setup is needed.
 
 On first use, SpotFetch will open a browser window for you to log in to Spotify and authorize the app.
