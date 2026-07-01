@@ -7,7 +7,9 @@ A simple python program to download Music from various platfroms using yt-dlp ( 
 
 ## What it can do :
 
-- Download Spotify playlists after exporting the playlist as a csv file from [Exportify](https://exportify.app)
+- Download Spotify playlists directly (without Exportify) using the Spotify Web API
+- Download your Liked Songs from Spotify
+- Download Spotify playlists after exporting the playlist as a csv file from [Exportify](https://exportify.app) (still supported)
 - batch download music from a .txt file with URLs one by line, or using a custom CSV file with headers *name,artist*
 - Direct download from a Youtube url, can be a video or playlist.
 - Search then download a song using its name and artist name.
@@ -57,6 +59,16 @@ python3 menu.py
 It is recommended to use a virtual environement since installing requirements globally on your machine is generally bad,
 before running `pip install -r requirements.txt` make sure you [create](https://docs.python.org/3/library/venv.html#creating-virtual-environments) and then [activate](https://docs.python.org/3/library/venv.html#how-venvs-work) a venv, and if on Windows and running powershell you might need to run `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser` before activating the venv.
 
+
+### Spotify API Setup (for direct Spotify downloads) :
+
+SpotFetch can download playlists and liked songs directly from Spotify without needing Exportify.
+A built-in Client ID is provided, so no account setup is needed.
+
+On first use, SpotFetch will open a browser window for you to log in to Spotify and authorize the app.
+Your session is saved for future use (no need to log in again).
+
+To use your own Spotify app instead (optional), set the `SPOTIFY_CLIENT_ID` environment variable.
 
 ## Some details :
 
