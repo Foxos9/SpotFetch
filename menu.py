@@ -3,6 +3,7 @@
 import functions
 import os
 import sys
+import re as re_mod
 import spotify_auth
 import spotify_api
 from rich.console import Console
@@ -535,6 +536,124 @@ def get_spotify_access_token():
         return None
 
 
+def spotify_search():
+    """Search Spotify for tracks and albums, then download."""
+    console.clear()
+    show_banner()
+    show_current_settings()
+
+    console.print(Panel("Search Spotify", style="bold blue"))
+
+    query = Prompt.ask("Enter search query (track or album name)")
+    if not query:
+        return
+
+    token = get_spotify_access_token()
+    if not token:
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    console.print("Searching...", style="yellow")
+
+    tracks = []
+    albums = []
+    try:
+        tracks = spotify_api.search_tracks(query, token, limit=8)
+    except Exception:
+        pass
+    try:
+        albums = spotify_api.search_albums(query, token, limit=8)
+    except Exception:
+        pass
+
+    items = []
+    for t in tracks:
+        meta = spotify_api.track_to_metadata(t)
+        items.append({"type": "track", "id": t.get("id"), "data": t, "meta": meta})
+    for a in albums:
+        items.append({
+            "type": "album",
+            "id": a.get("id"),
+            "data": a,
+            "display": a.get("name", ""),
+            "artist": (a.get("artists") or [{}])[0].get("name", ""),
+            "tracks": a.get("total_tracks", "?"),
+            "year": (a.get("release_date") or "")[:4],
+        })
+
+    if not items:
+        console.print("[yellow]No results found.[/yellow]")
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    while True:
+        console.clear()
+        show_banner()
+        show_current_settings()
+        console.print(Panel(f"Spotify Results for: {query}", style="bold green"))
+
+        table = Table(box=box.ROUNDED)
+        table.add_column("#", style="cyan", justify="right", width=4)
+        table.add_column("Type", style="blue", width=6)
+        table.add_column("Title", style="yellow")
+        table.add_column("Artist", style="white")
+        table.add_column("Info", style="white")
+
+        for i, item in enumerate(items, 1):
+            if item["type"] == "track":
+                m = item["meta"]
+                mins = (m["track_duration_ms"] // 1000) // 60
+                secs = (m["track_duration_ms"] // 1000) % 60
+                table.add_row(
+                    str(i),
+                    "Track",
+                    m["track_name"][:40],
+                    ", ".join(m["artist_names"])[:30],
+                    f"{mins}:{secs:02d}",
+                )
+            else:
+                table.add_row(
+                    str(i),
+                    "Album",
+                    item["display"][:45],
+                    item["artist"][:30],
+                    f"{item['tracks']} tracks, {item['year']}",
+                )
+
+        console.print(table)
+        console.print()
+        console.print("[dim]0[/dim] to go back")
+        console.print()
+
+        choice = Prompt.ask("Enter number to download", default="0")
+
+        try:
+            idx = int(choice)
+        except ValueError:
+            continue
+
+        if idx == 0:
+            return
+
+        if 1 <= idx <= len(items):
+            item = items[idx - 1]
+            if item["type"] == "track":
+                meta = item["meta"]
+                songs = [meta]
+                download_spotify_songs_from_list(songs, settings["platform"])
+            else:
+                album_id = item["id"]
+                try:
+                    raw_tracks = spotify_api.fetch_album_tracks(album_id, token)
+                    songs = [spotify_api.track_to_metadata(t) for t in raw_tracks]
+                    console.print(f"\nDownloading [cyan]{item['display']}[/cyan] ({len(songs)} tracks)...")
+                    download_spotify_songs_from_list(songs, settings["platform"])
+                except Exception as e:
+                    console.print(f"[red]Failed to fetch album tracks: {e}[/red]")
+            Prompt.ask("\nPress Enter to continue...")
+            return
+
+
 def process_spotify_playlist():
     """Download tracks from a Spotify playlist URL."""
     console.clear()
@@ -581,6 +700,57 @@ def process_spotify_playlist():
 
     if not raw_tracks:
         console.print("[yellow]No tracks found in this playlist.[/yellow]")
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    songs = [spotify_api.track_to_metadata(t) for t in raw_tracks]
+    console.print(f"Found [cyan]{len(songs)}[/cyan] tracks. Starting download...\n")
+
+    download_spotify_songs_from_list(songs, settings["platform"])
+    Prompt.ask("\nPress Enter to continue...")
+
+
+def process_spotify_album():
+    """Download tracks from a Spotify album URL."""
+    console.clear()
+    show_banner()
+    show_current_settings()
+
+    console.print(Panel("Download Spotify Album", style="bold blue"))
+    console.print(
+        "Paste a Spotify album URL, e.g.:\n"
+        "  https://open.spotify.com/album/6akEvsycLGftJxYudPjmqK",
+        style="italic white",
+    )
+
+    url = Prompt.ask("Enter album URL").strip()
+    if not url:
+        return
+
+    m = re_mod.search(r"(?:open\.)?spotify\.com/album/([a-zA-Z0-9]+)", url)
+    if not m:
+        console.print("[red]Invalid Spotify album URL.[/red]")
+        Prompt.ask("\nPress Enter to continue...")
+        return
+    album_id = m.group(1)
+
+    token = get_spotify_access_token()
+    if not token:
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    console.print("Fetching album...", style="yellow")
+    try:
+        raw_tracks = spotify_api.fetch_album_tracks(album_id, token)
+        album_name = spotify_api.fetch_album_name(album_id, token)
+        console.print(f"Album: [cyan]{album_name}[/cyan]")
+    except Exception as e:
+        console.print(f"[red]Failed to fetch album: {e}[/red]")
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    if not raw_tracks:
+        console.print("[yellow]No tracks found in this album.[/yellow]")
         Prompt.ask("\nPress Enter to continue...")
         return
 
@@ -718,11 +888,13 @@ def spotify_submenu():
         table.add_column("Description", style="white")
 
         options = [
-            ("1", "List My Playlists", "Choose from your saved playlists"),
-            ("2", "Download Liked Songs", "Download all your saved/liked songs"),
-            ("3", "Download a Playlist", "Paste a Spotify playlist URL"),
-            ("4", "Log Out of Spotify", "Clear stored authentication tokens"),
-            ("5", "Back to Main Menu", "Return to the main menu"),
+            ("1", "Search Spotify", "Search tracks and albums by name"),
+            ("2", "List My Playlists", "Choose from your saved playlists"),
+            ("3", "Download Liked Songs", "Download all your saved/liked songs"),
+            ("4", "Download a Playlist", "Paste a Spotify playlist URL"),
+            ("5", "Download an Album", "Paste a Spotify album URL"),
+            ("6", "Log Out of Spotify", "Clear stored authentication tokens"),
+            ("7", "Back to Main Menu", "Return to the main menu"),
         ]
 
         for opt, action, desc in options:
@@ -732,16 +904,20 @@ def spotify_submenu():
         console.print()
 
         choice = Prompt.ask(
-            "Select an option", choices=["1", "2", "3", "4", "5"], default="1"
+            "Select an option", choices=["1", "2", "3", "4", "5", "6", "7"], default="1"
         )
 
         if choice == "1":
-            process_spotify_list_playlists()
+            spotify_search()
         elif choice == "2":
-            process_spotify_liked_songs()
+            process_spotify_list_playlists()
         elif choice == "3":
-            process_spotify_playlist()
+            process_spotify_liked_songs()
         elif choice == "4":
+            process_spotify_playlist()
+        elif choice == "5":
+            process_spotify_album()
+        elif choice == "6":
             client_id = settings.get("spotify_client_id") or os.environ.get("SPOTIFY_CLIENT_ID")
             if client_id:
                 auth = spotify_auth.SpotifyAuth(client_id)
@@ -750,7 +926,7 @@ def spotify_submenu():
             else:
                 console.print("[yellow]No Spotify session to log out from.[/yellow]")
             Prompt.ask("\nPress Enter to continue...")
-        elif choice == "5":
+        elif choice == "7":
             return
 
 

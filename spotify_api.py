@@ -108,6 +108,54 @@ def fetch_liked_songs(access_token):
     return tracks
 
 
+def search_tracks(query, access_token, limit=10):
+    """Search Spotify for tracks by name/artist."""
+    url = "https://api.spotify.com/v1/search"
+    headers = {'Authorization': f'Bearer {access_token}'}
+    resp = requests.get(url, params={'q': query, 'type': 'track', 'limit': limit}, headers=headers, timeout=30)
+    _check_response(resp)
+    data = resp.json()
+    return data.get('tracks', {}).get('items', [])
+
+
+def search_albums(query, access_token, limit=10):
+    """Search Spotify for albums by name."""
+    url = "https://api.spotify.com/v1/search"
+    headers = {'Authorization': f'Bearer {access_token}'}
+    resp = requests.get(url, params={'q': query, 'type': 'album', 'limit': limit}, headers=headers, timeout=30)
+    _check_response(resp)
+    data = resp.json()
+    return data.get('albums', {}).get('items', [])
+
+
+def fetch_album_name(album_id, access_token):
+    url = f"https://api.spotify.com/v1/albums/{album_id}"
+    headers = {'Authorization': f'Bearer {access_token}'}
+    resp = requests.get(url, headers=headers, timeout=30)
+    _check_response(resp)
+    data = resp.json()
+    return data.get('name', 'Unknown Album')
+
+
+def fetch_album_tracks(album_id, access_token):
+    tracks = []
+    url = f"https://api.spotify.com/v1/albums/{album_id}/tracks"
+    headers = {'Authorization': f'Bearer {access_token}'}
+
+    while url:
+        resp = requests.get(url, headers=headers, timeout=30)
+        _check_response(resp)
+        data = resp.json()
+
+        for item in data.get('items', []):
+            item['album'] = {'id': album_id}
+            tracks.append(item)
+
+        url = data.get('next')
+
+    return tracks
+
+
 def track_to_metadata(spotify_track):
     return {
         'track_name': sanitize_string(spotify_track.get('name', 'Unknown Track')),
