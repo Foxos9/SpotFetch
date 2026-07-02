@@ -3,9 +3,10 @@
 import functions
 import os
 import sys
-import re as re_mod
+import re
 import spotify_auth
 import spotify_api
+import tidal_api
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -23,6 +24,7 @@ settings = {
     "platform": "ytmusic",
     "tolerance": 2,
     "spotify_client_id": os.environ.get("SPOTIFY_CLIENT_ID"),
+    "tidal_quality": "HIGH",
 }
 
 art = r"""
@@ -77,6 +79,9 @@ def show_current_settings():
             f"{'Configured' if settings['spotify_client_id'] else 'Not configured (set in Settings)'}",
             "cyan",
         ),
+        ("\n"),
+        ("TIDAL Quality: ", "white"),
+        (settings["tidal_quality"], "cyan"),
     )
 
     panel = Panel(
@@ -111,8 +116,13 @@ def configure_settings():
             "Configure Spotify API",
             f"Client ID: {settings['spotify_client_id'] or 'Not set'}",
         ),
-        ("7", "Reset to Defaults", "Reset all settings"),
-        ("8", "Back to Main Menu", "Return to main menu"),
+        (
+            "7",
+            "Configure TIDAL Quality",
+            f"Currently: {settings['tidal_quality']}",
+        ),
+        ("8", "Reset to Defaults", "Reset all settings"),
+        ("9", "Back to Main Menu", "Return to main menu"),
     ]
 
     table = Table(title="Settings Menu", box=box.ROUNDED, title_style="bold cyan")
@@ -128,8 +138,8 @@ def configure_settings():
 
     choice = Prompt.ask(
         "Select setting to configure",
-        choices=["1", "2", "3", "4", "5", "6", "7", "8"],
-        default="8",
+        choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+        default="9",
     )
 
     if choice == "1":
@@ -145,11 +155,13 @@ def configure_settings():
     elif choice == "6":
         configure_spotify_settings()
     elif choice == "7":
-        reset_settings()
+        configure_tidal_settings()
     elif choice == "8":
+        reset_settings()
+    elif choice == "9":
         return
 
-    if choice != "8":
+    if choice != "9":
         console.print()
         show_current_settings()
         if Confirm.ask("\nConfigure another setting?", default=False):
@@ -727,6 +739,7 @@ def process_spotify_album():
     if not url:
         return
 
+    import re as re_mod
     m = re_mod.search(r"(?:open\.)?spotify\.com/album/([a-zA-Z0-9]+)", url)
     if not m:
         console.print("[red]Invalid Spotify album URL.[/red]")
@@ -960,6 +973,466 @@ def configure_spotify_settings():
     Prompt.ask("\nPress Enter to continue...")
 
 
+def configure_tidal_settings():
+    """Configure TIDAL download quality."""
+    console.clear()
+    show_banner()
+    console.print(Panel("TIDAL Settings", style="bold yellow"))
+
+    console.print(
+        "TIDAL uses a hardcoded app token for search and metadata (no account needed).\n"
+        "Full track downloads require a TIDAL HiFi subscription.\n"
+        "Without a subscription, only 30-second previews are available.\n",
+        style="white",
+    )
+
+    qualities = ["LOW", "HIGH", "LOSSLESS", "HI_RES_LOSSLESS"]
+    quality_descriptions = {
+        "LOW": "HE-AAC v1 (~96kbps)",
+        "HIGH": "AAC (~320kbps)",
+        "LOSSLESS": "FLAC 16-bit/44.1kHz",
+        "HI_RES_LOSSLESS": "FLAC up to 24-bit/96kHz",
+    }
+
+    table = Table(box=box.SIMPLE)
+    table.add_column("Option", style="cyan", justify="center")
+    table.add_column("Quality", style="green")
+    table.add_column("Description", style="white")
+
+    for i, q in enumerate(qualities, 1):
+        table.add_row(str(i), q, quality_descriptions[q])
+
+    console.print(table)
+    console.print(f"\nCurrent quality: [cyan]{settings['tidal_quality']}[/cyan]")
+
+    choice = Prompt.ask("Choose quality", choices=["1", "2", "3", "4"], default="2")
+    settings["tidal_quality"] = qualities[int(choice) - 1]
+    console.print(f"TIDAL quality set to: [green]{settings['tidal_quality']}[/green]")
+
+    Prompt.ask("\nPress Enter to continue...")
+
+
+def tidal_download_with_fallback(track_id, output_path, quality="HIGH"):
+    """Download a TIDAL track, falling back to yt-dlp with TIDAL metadata if only preview is available."""
+    client = tidal_api.TidalClient()
+
+    try:
+        track = client.get_track(track_id)
+    except Exception as e:
+        console.print(f"[red]Failed to get track metadata: {e}[/red]")
+        return
+
+    meta = client.track_to_metadata(track)
+    track_name = meta["track_name"]
+    artists = ", ".join(meta["artist_names"])
+    console.print(f"Track: [cyan]{track_name}[/cyan] by [cyan]{artists}[/cyan]")
+
+    if meta.get("isrc"):
+        console.print(f"ISRC: [yellow]{meta['isrc']}[/yellow]")
+
+    try:
+        stream_url, is_preview = client.get_stream_url(track_id, quality)
+    except Exception:
+        stream_url, is_preview = None, True
+
+    if stream_url and not is_preview:
+        console.print("Full track available from TIDAL. Downloading directly...", style="green")
+        try:
+            safe_artist = re.sub(r'[<>:"/\\|?*]', "_", artists)
+            safe_title = re.sub(r'[<>:"/\\|?*]', "_", track_name)
+            filename = f"{safe_title} - {safe_artist}.mp3"
+            filepath = client.download_track(track_id, quality, output_path, filename)
+            console.print(f"[SUCCESS] Downloaded: {filepath}", style="green bold")
+            return
+        except Exception as e:
+            console.print(f"[yellow]TIDAL direct download failed: {e}[/yellow]")
+            console.print("Falling back to yt-dlp...", style="yellow")
+    elif stream_url and is_preview:
+        console.print("Only 30s preview available from TIDAL (no subscription).", style="yellow")
+        console.print("Falling back to yt-dlp with TIDAL metadata...", style="yellow")
+    else:
+        console.print("No TIDAL stream available. Using yt-dlp with TIDAL metadata...", style="yellow")
+
+    song = {
+        "track_name": track_name,
+        "artist_name": artists,
+        "artist_names": meta["artist_names"],
+        "album_name": meta["album_name"],
+        "album_release_date": meta["album_release_date"],
+        "track_duration_ms": meta["track_duration_ms"],
+        "isrc": meta.get("isrc", ""),
+    }
+
+    try:
+        functions.download_spotify_song(
+            settings["format"],
+            song,
+            output_path,
+            settings["cookie_file"],
+            settings["platform"],
+            settings["tolerance"],
+        )
+        console.print(f"[SUCCESS] Successfully downloaded: {track_name}", style="green bold")
+    except Exception as e:
+        console.print(f"[FAIL] Failed to download {track_name}: {e}", style="red")
+        with open(os.path.join(output_path, "failed.txt"), "a", encoding="utf-8") as f:
+            f.write(f"{track_name} by {artists} (TIDAL)\n")
+
+
+def tidal_search_tracks():
+    """Search TIDAL for tracks and albums, then download the selection."""
+    console.clear()
+    show_banner()
+    console.print(Panel("Search TIDAL", style="bold blue"))
+
+    query = Prompt.ask("Enter search query (track or album name)")
+    if not query:
+        return
+
+    client = tidal_api.TidalClient()
+    console.print("Searching...", style="yellow")
+
+    tracks = []
+    albums = []
+    try:
+        tracks = client.search_tracks(query, limit=8)
+    except Exception:
+        pass
+    try:
+        albums = client.search_albums(query, limit=8)
+    except Exception:
+        pass
+
+    items = []
+    for t in tracks:
+        meta = client.track_to_metadata(t)
+        items.append({"type": "track", "id": t.get("id"), "data": t, "meta": meta})
+    for a in albums:
+        artist = a.get("artist", {}) or {}
+        items.append({
+            "type": "album",
+            "id": a.get("id"),
+            "data": a,
+            "display": (a.get("title") or ""),
+            "artist": (artist.get("name") or ""),
+            "tracks": a.get("numberOfTracks", "?"),
+            "year": str((a.get("releaseDate") or "") or "")[:4],
+        })
+
+    if not items:
+        console.print("[yellow]No results found.[/yellow]")
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    while True:
+        console.clear()
+        show_banner()
+        console.print(Panel(f"Results for: {query}", style="bold green"))
+
+        table = Table(box=box.ROUNDED)
+        table.add_column("#", style="cyan", justify="right", width=4)
+        table.add_column("Type", style="blue", width=6)
+        table.add_column("Title", style="yellow")
+        table.add_column("Artist", style="white")
+        table.add_column("Info", style="white")
+
+        for i, item in enumerate(items, 1):
+            if item["type"] == "track":
+                m = item["meta"]
+                mins = (m["track_duration_ms"] // 1000) // 60
+                secs = (m["track_duration_ms"] // 1000) % 60
+                table.add_row(
+                    str(i),
+                    "Track",
+                    m["track_name"][:40],
+                    ", ".join(m["artist_names"])[:30],
+                    f"{mins}:{secs:02d}",
+                )
+            else:
+                table.add_row(
+                    str(i),
+                    "Album",
+                    item["display"][:45],
+                    item["artist"][:30],
+                    f"{item['tracks']} tracks, {item['year']}",
+                )
+
+        console.print(table)
+        console.print()
+        console.print("[dim]0[/dim] to go back")
+        console.print()
+
+        choice = Prompt.ask("Enter number to download", default="0")
+
+        try:
+            idx = int(choice)
+        except ValueError:
+            continue
+
+        if idx == 0:
+            return
+
+        if 1 <= idx <= len(items):
+            item = items[idx - 1]
+            if item["type"] == "track":
+                tidal_download_with_fallback(item["id"], settings["output_path"], settings["tidal_quality"])
+            else:
+                tidal_download_album(item["id"])
+            Prompt.ask("\nPress Enter to continue...")
+            return
+
+
+def tidal_search_albums():
+    """Search TIDAL and download a full album."""
+    console.clear()
+    show_banner()
+    console.print(Panel("Search TIDAL Albums", style="bold blue"))
+
+    query = Prompt.ask("Enter album name")
+    if not query:
+        return
+
+    client = tidal_api.TidalClient()
+    console.print("Searching...", style="yellow")
+
+    try:
+        results = client.search_albums(query, limit=10)
+    except Exception as e:
+        console.print(f"[red]Search failed: {e}[/red]")
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    if not results:
+        console.print("[yellow]No albums found.[/yellow]")
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    while True:
+        console.clear()
+        show_banner()
+        console.print(Panel(f"Album Results for: {query}", style="bold green"))
+
+        table = Table(box=box.ROUNDED)
+        table.add_column("#", style="cyan", justify="right", width=4)
+        table.add_column("Album", style="yellow")
+        table.add_column("Artist", style="white")
+        table.add_column("Tracks", style="white", justify="right")
+        table.add_column("Year", style="white")
+
+        for i, a in enumerate(results, 1):
+            artist = a.get("artist", {}) or {}
+            table.add_row(
+                str(i),
+                (a.get("title") or "")[:45],
+                (artist.get("name") or "")[:30],
+                str(a.get("numberOfTracks", "?")),
+                str(a.get("releaseDate", "") or "")[:4],
+            )
+
+        console.print(table)
+        console.print()
+        console.print("[dim]0[/dim] to go back")
+        console.print()
+
+        choice = Prompt.ask("Enter number to download album", default="0")
+
+        try:
+            idx = int(choice)
+        except ValueError:
+            continue
+
+        if idx == 0:
+            return
+
+        if 1 <= idx <= len(results):
+            album = results[idx - 1]
+            album_id = album.get("id")
+            if album_id:
+                tidal_download_album(album_id)
+            Prompt.ask("\nPress Enter to continue...")
+            return
+
+
+def tidal_download_album(album_id):
+    """Download all tracks from a TIDAL album."""
+    client = tidal_api.TidalClient()
+    console.print("Fetching album...", style="yellow")
+
+    try:
+        album = client.get_album(album_id)
+    except Exception as e:
+        console.print(f"[red]Failed to get album: {e}[/red]")
+        return
+
+    album_title = album.get("title", "Unknown Album")
+    artist_name = album.get("artist", {}).get("name", "Unknown Artist")
+    tracks = album.get("tracks", [])
+
+    console.print(f"Album: [cyan]{album_title}[/cyan] by [cyan]{artist_name}[/cyan]")
+    console.print(f"Tracks: [yellow]{len(tracks)}[/yellow]")
+    console.print()
+
+    if not tracks:
+        console.print("[yellow]No tracks found in this album.[/yellow]")
+        return
+
+    output_path = settings["output_path"]
+
+    failed = 0
+    for i, item in enumerate(tracks, 1):
+        track = item.get("item", item) if isinstance(item, dict) else item
+        tid = track.get("id")
+        if not tid:
+            continue
+
+        meta = client.track_to_metadata(track)
+        track_name = meta["track_name"]
+        artists = ", ".join(meta["artist_names"])
+        console.print(f"[{i}/{len(tracks)}] {track_name} - {artists}", style="cyan")
+
+        try:
+            tidal_download_with_fallback(tid, output_path, settings["tidal_quality"])
+        except Exception as e:
+            console.print(f"[FAIL] {track_name}: {e}", style="red")
+            failed += 1
+            continue
+
+    console.print(f"\nAlbum download complete! Failed: {failed}/{len(tracks)}", style="green bold")
+
+
+def tidal_download_from_url():
+    """Download from a TIDAL URL (track, album, or playlist)."""
+    console.clear()
+    show_banner()
+    console.print(Panel("Download from TIDAL URL", style="bold blue"))
+    console.print(
+        "Supports:\n"
+        "  https://tidal.com/browse/track/12345678\n"
+        "  https://tidal.com/browse/album/12345678\n"
+        "  https://tidal.com/browse/playlist/12345678",
+        style="italic white",
+    )
+
+    url = Prompt.ask("Enter TIDAL URL").strip()
+    if not url:
+        return
+
+    client = tidal_api.TidalClient()
+
+    try:
+        typ, item_id = client.resolve_tidal_url(url)
+    except Exception:
+        typ, item_id = None, None
+
+    if not typ or not item_id:
+        console.print("[red]Could not parse TIDAL URL.[/red]")
+        console.print("Expected format: https://tidal.com/browse/[track|album|playlist]/ID")
+        Prompt.ask("\nPress Enter to continue...")
+        return
+
+    console.print(f"Detected: [cyan]{typ}[/cyan] ID: [cyan]{item_id}[/cyan]")
+
+    try:
+        if typ == "track":
+            tidal_download_with_fallback(int(item_id), settings["output_path"], settings["tidal_quality"])
+        elif typ == "album":
+            tidal_download_album(int(item_id))
+        elif typ == "playlist":
+            tidal_download_playlist(int(item_id))
+    except Exception as e:
+        console.print(f"[red]Download failed: {e}[/red]")
+
+    Prompt.ask("\nPress Enter to continue...")
+
+
+def tidal_download_playlist(playlist_id):
+    """Download all tracks from a TIDAL playlist."""
+    client = tidal_api.TidalClient()
+    console.print("Fetching playlist...", style="yellow")
+
+    try:
+        playlist = client.get_playlist(playlist_id)
+    except Exception as e:
+        console.print(f"[red]Failed to get playlist: {e}[/red]")
+        return
+
+    playlist_title = playlist.get("title", "Unknown Playlist")
+    tracks = playlist.get("tracks", [])
+
+    console.print(f"Playlist: [cyan]{playlist_title}[/cyan]")
+    console.print(f"Tracks: [yellow]{len(tracks)}[/yellow]")
+    console.print()
+
+    if not tracks:
+        console.print("[yellow]No tracks found in this playlist.[/yellow]")
+        return
+
+    output_path = settings["output_path"]
+    failed = 0
+    for i, track in enumerate(tracks, 1):
+        tid = track.get("id")
+        if not tid:
+            continue
+
+        meta = client.track_to_metadata(track)
+        track_name = meta["track_name"]
+        artists = ", ".join(meta["artist_names"])
+        console.print(f"[{i}/{len(tracks)}] {track_name} - {artists}", style="cyan")
+
+        try:
+            tidal_download_with_fallback(tid, output_path, settings["tidal_quality"])
+        except Exception as e:
+            console.print(f"[FAIL] {track_name}: {e}", style="red")
+            failed += 1
+            continue
+
+    console.print(f"\nPlaylist download complete! Failed: {failed}/{len(tracks)}", style="green bold")
+
+
+def tidal_submenu():
+    """TIDAL operations submenu."""
+    while True:
+        console.clear()
+        show_banner()
+        show_current_settings()
+
+        console.print(Panel("TIDAL Downloader", style="bold magenta"))
+
+        table = Table(title="TIDAL Menu", box=box.ROUNDED, title_style="bold cyan")
+        table.add_column("Option", style="cyan", justify="center", width=8)
+        table.add_column("Action", style="yellow", width=25)
+        table.add_column("Description", style="white")
+
+        options = [
+            ("1", "Search and Download a Track", "Search TIDAL by name, download with metadata"),
+            ("2", "Search and Download an Album", "Download full album from TIDAL"),
+            ("3", "Download from TIDAL URL", "Download track/album/playlist from TIDAL link"),
+            ("4", "Change TIDAL Quality", f"Currently: {settings['tidal_quality']}"),
+            ("5", "Back to Main Menu", "Return to the main menu"),
+        ]
+
+        for opt, action, desc in options:
+            table.add_row(opt, action, desc)
+
+        console.print(table)
+        console.print()
+
+        choice = Prompt.ask(
+            "Select an option", choices=["1", "2", "3", "4", "5"], default="1"
+        )
+
+        if choice == "1":
+            tidal_search_tracks()
+        elif choice == "2":
+            tidal_search_albums()
+        elif choice == "3":
+            tidal_download_from_url()
+        elif choice == "4":
+            configure_tidal_settings()
+        elif choice == "5":
+            return
+
+
 def main_menu():
     """Main application menu"""
     while True:
@@ -1001,10 +1474,15 @@ def main_menu():
             ),
             (
                 "7",
-                "Settings",
-                "Configure format (MP3/FLAC/M4A), output directory, and Spotify API",
+                "Download from TIDAL",
+                "Search TIDAL catalog or download TIDAL URLs (no account needed)",
             ),
-            ("8", "Exit", "Exit the application"),
+            (
+                "8",
+                "Settings",
+                "Configure format (MP3/FLAC/M4A), output directory, and API settings",
+            ),
+            ("9", "Exit", "Exit the application"),
         ]
 
         table = Table(
@@ -1021,7 +1499,7 @@ def main_menu():
         console.print()
 
         choice = Prompt.ask(
-            "Select an option", choices=[str(i) for i in range(1, 9)], default="1"
+            "Select an option", choices=[str(i) for i in range(1, 10)], default="1"
         )
 
         if choice == "1":
@@ -1037,8 +1515,10 @@ def main_menu():
         elif choice == "6":
             download_single_url()
         elif choice == "7":
-            configure_settings()
+            tidal_submenu()
         elif choice == "8":
+            configure_settings()
+        elif choice == "9":
             console.print("\nThank you for using SpotFetch!", style="bold cyan")
             console.print("Bye Bye!!", style="bold yellow")
             sys.exit(0)
