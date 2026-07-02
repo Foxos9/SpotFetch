@@ -3,10 +3,13 @@
 import functions
 import os
 import sys
+import json
 import re
 import spotify_auth
 import spotify_api
 import tidal_api
+import qobuz_api
+import deezer_api
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -17,15 +20,58 @@ from rich import box
 
 console = Console()
 
-settings = {
+CONFIG_DIR = os.path.expanduser("~/.config/spotfetch")
+SETTINGS_FILE = os.path.join(CONFIG_DIR, "settings.json")
+
+DEFAULT_SETTINGS = {
     "format": "mp3",
-    "output_path": ".",
+    "output_path": os.path.expanduser("~/Music"),
     "cookie_file": None,
     "platform": "ytmusic",
     "tolerance": 2,
     "spotify_client_id": os.environ.get("SPOTIFY_CLIENT_ID"),
     "tidal_quality": "HIGH",
+    "qobuz_enabled": True,
+    "qobuz_proxy_url": "https://qobuz.kennyy.com.br",
+    "deezer_enabled": True,
+    "deezer_proxy_url": "https://dzr.tabs-vs-spaces.wtf",
+    "deezer_quality": "HIGH",
+    "qobuz_quality": "HIGH",
+    "download_backend": "auto",
 }
+
+settings = dict(DEFAULT_SETTINGS)
+
+
+def _load_settings():
+    """Load saved settings from disk, merging with defaults."""
+    global settings
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r") as f:
+                saved = json.load(f)
+            merged = dict(DEFAULT_SETTINGS)
+            merged.update(saved)
+            # env var always wins for spotify_client_id
+            env_id = os.environ.get("SPOTIFY_CLIENT_ID")
+            if env_id:
+                merged["spotify_client_id"] = env_id
+            settings = merged
+    except Exception:
+        settings = dict(DEFAULT_SETTINGS)
+
+
+def _save_settings():
+    """Persist current settings to disk."""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump(settings, f, indent=2, default=str)
+    except Exception:
+        pass
+
+
+_load_settings()
 
 art = r"""
                         ____              _   _____    _       _     
@@ -54,34 +100,30 @@ def show_banner():
 
 def show_current_settings():
     """Display current settings"""
+    fmt_str = f"yt-dlp: {settings['format'].upper()} / Deezer: {settings['deezer_quality']} / Qobuz: {settings['qobuz_quality']} / TIDAL: {settings['tidal_quality']}"
+    backend_str = settings['download_backend']
     settings_text = Text.assemble(
         ("Current Settings:\n\n", "bold yellow"),
-        ("Audio Format: ", "white"),
-        (settings["format"].upper(), "cyan"),
-        ("\n"),
-        ("Output Directory: ", "white"),
+        ("Output Dir:      ", "white"),
         (settings["output_path"], "cyan"),
         ("\n"),
-        ("Cookie File: ", "white"),
+        ("Format:          ", "white"),
+        (fmt_str, "cyan"),
+        ("\n"),
+        ("Cookie File:     ", "white"),
         (settings["cookie_file"] or "None", "cyan"),
         ("\n"),
-        ("Download Platform: ", "white"),
-        (
-            f"{'YouTube Music' if settings['platform'] == 'ytmusic' else 'YouTube'}",
-            "cyan",
-        ),
-        ("\n"),
-        ("Duration Tolerance: ", "white"),
+        ("Tolerance:       ", "white"),
         (f"{settings['tolerance']}min", "cyan"),
         ("\n"),
-        ("Spotify API: ", "white"),
+        ("Spotify:         ", "white"),
         (
-            f"{'Configured' if settings['spotify_client_id'] else 'Not configured (set in Settings)'}",
+            f"{'Configured' if settings['spotify_client_id'] else 'Not configured'}",
             "cyan",
         ),
         ("\n"),
-        ("TIDAL Quality: ", "white"),
-        (settings["tidal_quality"], "cyan"),
+        ("Backend:         ", "white"),
+        (backend_str, "cyan"),
     )
 
     panel = Panel(
@@ -102,66 +144,60 @@ def configure_settings():
     console.print(Panel("Settings Configuration", style="bold blue"))
 
     settings_options = [
-        ("1", "Set Audio Format", f"Currently: {settings['format'].upper()}"),
-        ("2", "Set Output Directory", f"Currently: {settings['output_path']}"),
-        ("3", "Set Cookie File", f"Currently: {settings['cookie_file'] or 'None'}"),
-        ("4", "Set Download Platform", f"Currently: {settings['platform'].title()}"),
-        (
-            "5",
-            "Set duration tolerance",
-            f"Currently tolerance={settings['tolerance']}min",
-        ),
-        (
-            "6",
-            "Configure Spotify API",
-            f"Client ID: {settings['spotify_client_id'] or 'Not set'}",
-        ),
-        (
-            "7",
-            "Configure TIDAL Quality",
-            f"Currently: {settings['tidal_quality']}",
-        ),
-        ("8", "Reset to Defaults", "Reset all settings"),
-        ("9", "Back to Main Menu", "Return to main menu"),
+        ("1", "Output Directory", settings["output_path"],
+         "Where downloaded files are saved"),
+        ("2", "Download Format", f"yt-dlp: {settings['format'].upper()} / Deezer: {settings['deezer_quality']} / Qobuz: {settings['qobuz_quality']} / TIDAL: {settings['tidal_quality']}",
+         "Audio format for each download backend"),
+        ("3", "Cookie File", settings["cookie_file"] or "None",
+         "yt-dlp cookie file for YouTube authentication"),
+        ("4", "Duration Tolerance", f"{settings['tolerance']}min",
+         "Max duration mismatch when matching songs (minutes)"),
+        ("5", "Spotify API", f"{settings['spotify_client_id'] or 'Not set'}",
+         "Client ID required for Spotify playlist downloads"),
+        ("6", "Backends", f"mode: {settings['download_backend']}",
+         "Backend mode, Deezer & Qobuz proxy config"),
+        ("7", "Reset to Defaults", "",
+         "Restore all settings to factory defaults"),
+        ("8", "Back", "",
+         "Return to main menu"),
     ]
 
     table = Table(title="Settings Menu", box=box.ROUNDED, title_style="bold cyan")
     table.add_column("Option", style="cyan", justify="center", width=8)
-    table.add_column("Setting", style="yellow", width=25)
-    table.add_column("Current Value", style="white")
+    table.add_column("Setting", style="yellow", width=22)
+    table.add_column("Current", style="white", width=45)
+    table.add_column("Description", style="dim white", width=50)
 
-    for option, setting, current in settings_options:
-        table.add_row(option, setting, current)
+    for option, setting, current, desc in settings_options:
+        table.add_row(option, setting, current, desc)
 
     console.print(table)
     console.print()
 
     choice = Prompt.ask(
         "Select setting to configure",
-        choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
-        default="9",
+        choices=["1", "2", "3", "4", "5", "6", "7", "8"],
+        default="8",
     )
 
     if choice == "1":
-        set_audio_format()
-    elif choice == "2":
         set_output_directory()
+    elif choice == "2":
+        configure_download_quality()
     elif choice == "3":
         set_cookie_file()
     elif choice == "4":
-        set_download_platform()
-    elif choice == "5":
         set_duration_tolerance()
-    elif choice == "6":
+    elif choice == "5":
         configure_spotify_settings()
+    elif choice == "6":
+        configure_backend_settings()
     elif choice == "7":
-        configure_tidal_settings()
-    elif choice == "8":
         reset_settings()
-    elif choice == "9":
+    elif choice == "8":
         return
 
-    if choice != "9":
+    if choice != "8":
         console.print()
         show_current_settings()
         if Confirm.ask("\nConfigure another setting?", default=False):
@@ -180,14 +216,61 @@ def set_duration_tolerance():
 
     choice = Prompt.ask("Enter duration in minutes (Integer)", default=2)
     settings["tolerance"] = int(choice)
-
+    _save_settings()
     console.print(f"Duration tolerance set to: {settings['tolerance']}min")
 
 
 
+def configure_download_quality():
+    """Configure audio format per backend."""
+    while True:
+        console.clear()
+        show_banner()
+        console.print(Panel("Download Format", style="bold blue"))
+
+        table = Table(box=box.SIMPLE)
+        table.add_column("Option", style="cyan", justify="center")
+        table.add_column("Backend", style="yellow")
+        table.add_column("Current Format", style="white")
+
+        table.add_row("1", "yt-dlp", settings["format"].upper())
+        table.add_row("2", "Deezer", settings["deezer_quality"])
+        table.add_row("3", "Qobuz", settings["qobuz_quality"])
+        table.add_row("4", "TIDAL", settings["tidal_quality"])
+        table.add_row("5", "Back", "")
+
+        console.print(table)
+
+        choice = Prompt.ask(
+            "Select setting to configure", choices=["1", "2", "3", "4", "5"], default="5"
+        )
+
+        if choice == "1":
+            set_audio_format()
+        elif choice in ("2", "3", "4"):
+            key = {"2": "deezer_quality", "3": "qobuz_quality", "4": "tidal_quality"}[choice]
+            label = {"2": "Deezer", "3": "Qobuz", "4": "TIDAL"}[choice]
+            qualities = ["LOW", "HIGH", "LOSSLESS", "HI_RES_LOSSLESS"]
+            descs = {"LOW": "MP3 128kbps", "HIGH": "MP3 320kbps", "LOSSLESS": "FLAC 16-bit", "HI_RES_LOSSLESS": "FLAC 24-bit"}
+            q_table = Table(box=box.SIMPLE)
+            q_table.add_column("Option", style="cyan", justify="center")
+            q_table.add_column("Format", style="green")
+            q_table.add_column("Description", style="white")
+            for i, q in enumerate(qualities, 1):
+                q_table.add_row(str(i), q, descs[q])
+            console.print(q_table)
+            q_choice = Prompt.ask(f"Choose {label} format", choices=["1", "2", "3", "4"], default="2")
+            settings[key] = qualities[int(q_choice) - 1]
+            _save_settings()
+            console.print(f"{label} format set to: [green]{settings[key]}[/green]")
+            Prompt.ask("\nPress Enter to continue...")
+        elif choice == "5":
+            return
+
+
 def set_audio_format():
-    """Set the audio format"""
-    console.print(Panel("Set Audio Format", style="bold yellow"))
+    """Set the audio format for yt-dlp downloads."""
+    console.print(Panel("Set yt-dlp Audio Format", style="bold yellow"))
     formats = ["mp3", "m4a", "flac"]
 
     table = Table(box=box.SIMPLE)
@@ -203,6 +286,7 @@ def set_audio_format():
 
     choice = Prompt.ask("Choose format", choices=["1", "2", "3"], default="1")
     settings["format"] = formats[int(choice) - 1]
+    _save_settings()
     console.print(f"Audio format set to: {settings['format'].upper()}", style="green")
 
 
@@ -219,12 +303,15 @@ def set_output_directory():
                 os.makedirs(path, exist_ok=True)
                 console.print(f"Created directory: {path}", style="green")
                 settings["output_path"] = path
+                _save_settings()
             except Exception as e:
                 console.print(f"Error creating directory: {e}", style="red")
         else:
             console.print("Output directory unchanged", style="yellow")
     else:
         settings["output_path"] = path
+        _save_settings()
+        _save_settings()
         console.print(
             f"Output directory set to: {settings['output_path']}", style="green"
         )
@@ -243,6 +330,7 @@ def set_cookie_file():
         )
         if os.path.exists(cookie_path):
             settings["cookie_file"] = cookie_path
+            _save_settings()
             console.print(
                 f"Cookie file set to: {settings['cookie_file']}", style="green"
             )
@@ -250,6 +338,7 @@ def set_cookie_file():
             console.print("Cookie file not found", style="red")
     else:
         settings["cookie_file"] = None
+        _save_settings()
         console.print("Cookie file disabled", style="yellow")
 
 
@@ -279,6 +368,7 @@ def set_download_platform():
 
     choice = Prompt.ask("Choose platform", choices=["1", "2"], default="1")
     settings["platform"] = platforms[int(choice) - 1]
+    _save_settings()
     console.print(
         f"Download platform set to: {settings['platform'].title()}", style="green"
     )
@@ -287,11 +377,16 @@ def set_download_platform():
 def reset_settings():
     """Reset all settings to defaults"""
     console.print(Panel("Reset Settings", style="bold yellow"))
-    settings["format"] = "mp3"
-    settings["output_path"] = "."
-    settings["cookie_file"] = None
-    settings["platform"] = "ytmusic"
-    settings["tolerance"] = 2
+    global settings
+    defaults = dict(DEFAULT_SETTINGS)
+    defaults.update({
+        "deezer_quality": "HIGH",
+        "qobuz_quality": "HIGH",
+        "deezer_proxy_url": "https://dzr.tabs-vs-spaces.wtf",
+        "qobuz_proxy_url": "https://qobuz.kennyy.com.br",
+    })
+    settings = defaults
+    _save_settings()
     console.print("All settings reset to defaults", style="green")
 
 
@@ -964,6 +1059,7 @@ def configure_spotify_settings():
 
     if new_id.strip():
         settings["spotify_client_id"] = new_id.strip()
+        _save_settings()
         console.print("[green]Spotify Client ID updated![/green]")
     elif not current:
         console.print("[yellow]No Client ID set. Spotify features will not work until configured.[/yellow]")
@@ -1007,13 +1103,219 @@ def configure_tidal_settings():
 
     choice = Prompt.ask("Choose quality", choices=["1", "2", "3", "4"], default="2")
     settings["tidal_quality"] = qualities[int(choice) - 1]
+    _save_settings()
     console.print(f"TIDAL quality set to: [green]{settings['tidal_quality']}[/green]")
 
     Prompt.ask("\nPress Enter to continue...")
 
 
+def configure_backend_settings():
+    """Configure Qobuz, Deezer, and download backend settings."""
+    console.clear()
+    show_banner()
+    console.print(Panel("Backend Settings", style="bold yellow"))
+
+    console.print(
+        "Alternative audio backends look up tracks by ISRC.\n"
+        "They are tried in order: Deezer → Qobuz (when backend is set to auto).\n",
+        style="white",
+    )
+
+    table = Table(box=box.SIMPLE)
+    table.add_column("Option", style="cyan", justify="center")
+    table.add_column("Setting", style="yellow")
+    table.add_column("Current Value", style="white")
+
+    table.add_row("1", "yt-dlp Platform", settings["platform"].title())
+    table.add_row("2", "Download Backend", settings["download_backend"])
+    table.add_row("3", "Enable Qobuz", str(settings["qobuz_enabled"]))
+    table.add_row("4", "Qobuz Proxy URL", settings["qobuz_proxy_url"])
+    table.add_row("5", "Enable Deezer", str(settings["deezer_enabled"]))
+    table.add_row("6", "Deezer Proxy URL", settings["deezer_proxy_url"])
+    table.add_row("7", "Back", "")
+
+    console.print(table)
+
+    choice = Prompt.ask(
+        "Select setting to configure", choices=["1", "2", "3", "4", "5", "6", "7"], default="7"
+    )
+
+    if choice == "1":
+        console.print()
+        console.print("1 - YouTube Music (best for popular songs, avoids clips)")
+        console.print("2 - YouTube (best for niche/lesser known tracks)")
+        plat_choice = Prompt.ask("Choose platform", choices=["1", "2"], default="1")
+        settings["platform"] = ["ytmusic", "youtube"][int(plat_choice) - 1]
+        _save_settings()
+        console.print(f"Platform set to: [green]{settings['platform'].title()}[/green]")
+    elif choice == "2":
+        console.print()
+        console.print("Backend order:")
+        console.print("  auto        - yt-dlp, then Deezer, then Qobuz")
+        console.print("  ytdlp       - Only use yt-dlp (default, fastest)")
+        console.print("  deezer      - Only use Deezer")
+        console.print("  qobuz       - Only use Qobuz")
+        backend = Prompt.ask("Choose backend", choices=["auto", "qobuz", "deezer", "ytdlp"], default=settings["download_backend"])
+        settings["download_backend"] = backend
+        _save_settings()
+        console.print(f"Backend set to: {backend}", style="green")
+    elif choice == "3":
+        settings["qobuz_enabled"] = Confirm.ask("Enable Qobuz backend?", default=settings["qobuz_enabled"])
+        _save_settings()
+        console.print(f"Qobuz {'enabled' if settings['qobuz_enabled'] else 'disabled'}", style="green")
+    elif choice == "4":
+        new_url = Prompt.ask("Enter Qobuz proxy URL", default=settings["qobuz_proxy_url"])
+        if new_url.strip():
+            settings["qobuz_proxy_url"] = new_url.strip()
+            _save_settings()
+            console.print(f"Qobuz proxy set to: {settings['qobuz_proxy_url']}", style="green")
+    elif choice == "5":
+        settings["deezer_enabled"] = Confirm.ask("Enable Deezer backend?", default=settings["deezer_enabled"])
+        _save_settings()
+        console.print(f"Deezer {'enabled' if settings['deezer_enabled'] else 'disabled'}", style="green")
+    elif choice == "6":
+        new_url = Prompt.ask("Enter Deezer proxy URL", default=settings["deezer_proxy_url"])
+        if new_url.strip():
+            settings["deezer_proxy_url"] = new_url.strip()
+            _save_settings()
+            console.print(f"Deezer proxy set to: {settings['deezer_proxy_url']}", style="green")
+    elif choice == "7":
+        pass
+
+    Prompt.ask("\nPress Enter to continue...")
+
+
+def qobuz_download(isrc, output_path, track_name="Unknown", artists="Unknown"):
+    """Try to download a track from Qobuz using its ISRC."""
+    if not isrc or not settings.get("qobuz_enabled", True):
+        return None
+
+    console.print("Trying Qobuz...", style="yellow")
+    client = qobuz_api.QobuzClient(proxy_url=settings.get("qobuz_proxy_url"))
+
+    try:
+        track = client.lookup_by_isrc(isrc)
+        if not track:
+            console.print("  Track not found on Qobuz", style="yellow")
+            return None
+
+        safe_artist = re.sub(r'[<>:"/\\|?*]', "_", artists)
+        safe_title = re.sub(r'[<>:"/\\|?*]', "_", track_name)
+        format_ext = settings["format"]
+        filename = f"{safe_title} - {safe_artist}.{format_ext}"
+
+        qobuz_q = settings.get("qobuz_quality", "HIGH")
+        filepath = client.download_track(track["id"], qobuz_q, output_path, filename)
+        console.print(f"[SUCCESS] Downloaded from Qobuz: {track_name}", style="green bold")
+        return filepath
+    except qobuz_api.QobuzAPIError as e:
+        console.print(f"  Qobuz failed: {e}", style="yellow")
+        return None
+    except Exception as e:
+        console.print(f"  Qobuz error: {e}", style="yellow")
+        return None
+
+
+def deezer_download(isrc, output_path, track_name="Unknown", artists="Unknown"):
+    """Try to download a track from Deezer using its ISRC."""
+    if not isrc or not settings.get("deezer_enabled", True):
+        return None
+
+    console.print("Trying Deezer...", style="yellow")
+    client = deezer_api.DeezerClient(proxy_url=settings.get("deezer_proxy_url"))
+
+    try:
+        url, fmt = client.get_stream_url(isrc, settings.get("deezer_quality", "HIGH"))
+        if not url:
+            console.print("  Track not found on Deezer", style="yellow")
+            return None
+
+        safe_artist = re.sub(r'[<>:"/\\|?*]', "_", artists)
+        safe_title = re.sub(r'[<>:"/\\|?*]', "_", track_name)
+        ext = "mp3"
+        if fmt == "FLAC":
+            ext = "flac"
+        filename = f"{safe_title} - {safe_artist}.{ext}"
+
+        filepath = client.download_by_isrc(isrc, settings.get("deezer_quality", "HIGH"), output_path, filename)
+        console.print(f"[SUCCESS] Downloaded from Deezer: {track_name}", style="green bold")
+        return filepath
+    except deezer_api.DeezerAPIError as e:
+        console.print(f"  Deezer failed: {e}", style="yellow")
+        return None
+    except Exception as e:
+        console.print(f"  Deezer error: {e}", style="yellow")
+        return None
+
+
+def ytdlp_download(meta, output_path):
+    """Download a track using yt-dlp with metadata."""
+    try:
+        functions.download_spotify_song(
+            settings["format"],
+            meta,
+            output_path,
+            settings["cookie_file"],
+            settings["platform"],
+            settings["tolerance"],
+        )
+        return True
+    except Exception as e:
+        console.print(f"[FAIL] yt-dlp failed: {e}", style="red")
+        return False
+
+
+def download_with_backends(meta, output_path):
+    """Download a track trying available backends based on settings.
+
+    meta dict must have: track_name, artist_names, track_duration_ms
+    and optionally: isrc, album_name, album_release_date
+
+    Backend order in auto mode: yt-dlp → Deezer → Qobuz
+    """
+    backend = settings.get("download_backend", "auto")
+    track_name = meta.get("track_name", "Unknown")
+    artists = ", ".join(meta.get("artist_names", ["Unknown"]))
+    isrc = meta.get("isrc", "")
+
+    if backend == "ytdlp":
+        return ytdlp_download(meta, output_path)
+
+    if backend == "deezer":
+        if isrc and settings.get("deezer_enabled", True):
+            result = deezer_download(isrc, output_path, track_name, artists)
+            if result:
+                return True
+        console.print("[yellow]Deezer failed or unavailable for this track.[/yellow]")
+        return False
+
+    if backend == "qobuz":
+        if isrc and settings.get("qobuz_enabled", True):
+            result = qobuz_download(isrc, output_path, track_name, artists)
+            if result:
+                return True
+        console.print("[yellow]Qobuz failed or unavailable for this track.[/yellow]")
+        return False
+
+    # auto: try yt-dlp → Deezer → Qobuz
+    if ytdlp_download(meta, output_path):
+        return True
+
+    if isrc and settings.get("deezer_enabled", True):
+        result = deezer_download(isrc, output_path, track_name, artists)
+        if result:
+            return True
+
+    if isrc and settings.get("qobuz_enabled", True):
+        result = qobuz_download(isrc, output_path, track_name, artists)
+        if result:
+            return True
+
+    return False
+
+
 def tidal_download_with_fallback(track_id, output_path, quality="HIGH"):
-    """Download a TIDAL track, falling back to yt-dlp with TIDAL metadata if only preview is available."""
+    """Download a TIDAL track, falling back to Qobuz/yt-dlp as configured."""
     client = tidal_api.TidalClient()
 
     try:
@@ -1030,30 +1332,32 @@ def tidal_download_with_fallback(track_id, output_path, quality="HIGH"):
     if meta.get("isrc"):
         console.print(f"ISRC: [yellow]{meta['isrc']}[/yellow]")
 
+    # Try TIDAL direct stream first
     try:
         stream_url, is_preview = client.get_stream_url(track_id, quality)
     except Exception:
         stream_url, is_preview = None, True
 
-    if stream_url and not is_preview:
+    backend = settings.get("download_backend", "auto")
+
+    if stream_url and not is_preview and backend != "ytdlp":
         console.print("Full track available from TIDAL. Downloading directly...", style="green")
         try:
             safe_artist = re.sub(r'[<>:"/\\|?*]', "_", artists)
             safe_title = re.sub(r'[<>:"/\\|?*]', "_", track_name)
-            filename = f"{safe_title} - {safe_artist}.mp3"
+            format_ext = settings["format"]
+            filename = f"{safe_title} - {safe_artist}.{format_ext}"
             filepath = client.download_track(track_id, quality, output_path, filename)
             console.print(f"[SUCCESS] Downloaded: {filepath}", style="green bold")
             return
         except Exception as e:
             console.print(f"[yellow]TIDAL direct download failed: {e}[/yellow]")
-            console.print("Falling back to yt-dlp...", style="yellow")
     elif stream_url and is_preview:
         console.print("Only 30s preview available from TIDAL (no subscription).", style="yellow")
-        console.print("Falling back to yt-dlp with TIDAL metadata...", style="yellow")
-    else:
-        console.print("No TIDAL stream available. Using yt-dlp with TIDAL metadata...", style="yellow")
 
-    song = {
+    # Fallback to configured backends
+    console.print("Trying alternative backends...", style="yellow")
+    song_meta = {
         "track_name": track_name,
         "artist_name": artists,
         "artist_names": meta["artist_names"],
@@ -1063,20 +1367,11 @@ def tidal_download_with_fallback(track_id, output_path, quality="HIGH"):
         "isrc": meta.get("isrc", ""),
     }
 
-    try:
-        functions.download_spotify_song(
-            settings["format"],
-            song,
-            output_path,
-            settings["cookie_file"],
-            settings["platform"],
-            settings["tolerance"],
-        )
-        console.print(f"[SUCCESS] Successfully downloaded: {track_name}", style="green bold")
-    except Exception as e:
-        console.print(f"[FAIL] Failed to download {track_name}: {e}", style="red")
+    success = download_with_backends(song_meta, output_path)
+    if not success:
+        console.print(f"[FAIL] All backends failed for: {track_name}", style="red")
         with open(os.path.join(output_path, "failed.txt"), "a", encoding="utf-8") as f:
-            f.write(f"{track_name} by {artists} (TIDAL)\n")
+            f.write(f"{track_name} by {artists}\n")
 
 
 def tidal_search_tracks():
