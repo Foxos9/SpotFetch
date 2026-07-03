@@ -593,17 +593,14 @@ def download_spotify_songs_from_list(songs, platform):
                 style="cyan",
             )
 
-            functions.download_spotify_song(
-                settings["format"],
-                song,
-                settings["output_path"],
-                settings["cookie_file"],
-                platform,
-                settings["tolerance"]
-            )
-            console.print(
+            if download_with_backends(song, settings["output_path"]):
+                console.print(
                     f"[SUCCESS] Successfully downloaded: {track_name}", style="green"
                 )
+            else:
+                console.print(f"[FAIL] Failed to download: {track_name}", style="red")
+                total_failed_songs += 1
+                continue
 
         except Exception as e:
             console.print(f"[FAIL] Failed to download {track_name}: {e}", style="red")  # type: ignore
@@ -1277,6 +1274,17 @@ def download_with_backends(meta, output_path):
     track_name = meta.get("track_name", "Unknown")
     artists = ", ".join(meta.get("artist_names", ["Unknown"]))
     isrc = meta.get("isrc", "")
+
+    safe_artists = re.sub(r'[<>:"/\\|?*]', "_", artists)
+    safe_track_name = re.sub(r'[<>:"/\\|?*]', "_", track_name)
+    for ext in {"mp3", "m4a", "flac"}:
+        for name in (
+            f"{track_name} - {artists}.{ext}",
+            f"{safe_track_name} - {safe_artists}.{ext}",
+        ):
+            if os.path.exists(os.path.join(output_path, name)):
+                console.print(f"[SKIP] {track_name} — already exists", style="yellow")
+                return True
 
     if backend == "ytdlp":
         return ytdlp_download(meta, output_path)

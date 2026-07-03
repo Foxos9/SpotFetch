@@ -139,21 +139,34 @@ def fetch_album_name(album_id, access_token):
 
 def fetch_album_tracks(album_id, access_token):
     tracks = []
-    url = f"https://api.spotify.com/v1/albums/{album_id}/tracks"
     headers = {'Authorization': f'Bearer {access_token}'}
 
+    url = f"https://api.spotify.com/v1/albums/{album_id}/tracks"
     while url:
         resp = requests.get(url, headers=headers, timeout=30)
         _check_response(resp)
         data = resp.json()
-
         for item in data.get('items', []):
-            item['album'] = {'id': album_id}
-            tracks.append(item)
-
+            if item.get('id'):
+                tracks.append(item)
         url = data.get('next')
 
-    return tracks
+    if not tracks:
+        return []
+
+    track_ids = [t['id'] for t in tracks if t.get('id')]
+    enriched = []
+    for i in range(0, len(track_ids), 50):
+        batch = track_ids[i:i+50]
+        resp = requests.get(
+            f"https://api.spotify.com/v1/tracks?ids={','.join(batch)}",
+            headers=headers, timeout=30
+        )
+        _check_response(resp)
+        for t in resp.json().get('tracks', []):
+            if t:
+                enriched.append(t)
+    return enriched
 
 
 def track_to_metadata(spotify_track):
@@ -174,5 +187,6 @@ def track_to_metadata(spotify_track):
         'album_release_date': sanitize_string(
             spotify_track.get('album', {}).get('release_date', '')
         ),
+        'isrc': spotify_track.get('external_ids', {}).get('isrc', ''),
         'genres': [],
     }
